@@ -35,7 +35,7 @@ def classify():
     
     try:
         # ==========================================
-        # ОБРАБОТКА ВИДЕО (СЛОЖНАЯ ЛОГИКА BPI + ВРЕМЯ)
+        # ОБРАБОТКА ВИДЕО
         # ==========================================
         if filename.endswith(('.mp4', '.avi', '.mov')):
             temp_in, temp_out = "in.mp4", "out.mp4"
@@ -48,72 +48,77 @@ def classify():
             out = cv2.VideoWriter(temp_out, cv2.VideoWriter_fourcc(*'mp4v'), fps/5, (w, h))
             
             f_idx = 0
-            deep_focus_simulated_minutes = 0.0 # Накопитель времени раздумий
+            # Массив для хранения времени Deep Focus индивидуально для каждого игрока (до 5 человек)
+            player_timers = [0.0] * 5 
             
             while True:
                 ret, frame = cap.read()
                 if not ret: break
                 f_idx += 1
-                if f_idx % 5 != 0: continue # Берем 1 кадр из 5 для скорости API
+                if f_idx % 5 != 0: continue 
                 
-                # СИМУЛЯЦИЯ: 1 реальная секунда видео = 3 минуты матча
                 real_seconds_passed = 5 / fps
                 simulated_minutes_added = real_seconds_passed * 3.0 
                 
                 _, buf = cv2.imencode('.jpg', frame)
                 url = f"https://detect.roboflow.com/{PROJECT_NAME}/{VERSION}?api_key={ROBOFLOW_API_KEY}&confidence=15"
-                resp = requests.post(url, data=base64.b64encode(buf).decode('ascii'), headers={"Content-Type": "application/x-www-form-urlencoded"}).json()
-                
-                is_deep_focus_now = False
-                
-                for p in resp.get('predictions', []):
-                    x, y, pw, ph = int(p['x']), int(p['y']), int(p['width']), int(p['height'])
-                    cls = p['class']
+                try:
+                    resp = requests.post(url, data=base64.b64encode(buf).decode('ascii'), headers={"Content-Type": "application/x-www-form-urlencoded"}).json()
                     
-                    if cls == "Deep_Focus":
-                        is_deep_focus_now = True
-                        color = (0, 0, 255)
-                    else:
-                        color = (255, 0, 255)
+                    # Сортируем предсказания слева направо (по координате X), чтобы точно знать, где Player 1, а где Player 2
+                    predictions = sorted(resp.get('predictions', []), key=lambda p: p['x'])
+                    
+                    for i, p in enumerate(predictions):
+                        if i >= 5: break # Ограничение на 5 игроков
+                        
+                        x, y, pw, ph = int(p['x']), int(p['y']), int(p['width']), int(p['height'])
+                        cls = p['class']
+                        
+                        # Обновляем таймер конкретного игрока
+                        if cls == "Deep_Focus":
+                            player_timers[i] += simulated_minutes_added
+                            color = (0, 0, 255) # Красный
+                        else:
+                            player_timers[i] = max(0, player_timers[i] - (simulated_minutes_added * 2))
+                            color = (255, 0, 255) # Фиолетовый
 
-                    cv2.rectangle(frame, (int(x-pw/2), int(y-ph/2)), (int(x+pw/2), int(y+ph/2)), color, 3, cv2.LINE_AA)
-                    cv2.putText(frame, cls, (int(x-pw/2), int(y-ph/2)-10), cv2.FONT_HERSHEY_COMPLEX, 0.8, color, 2, cv2.LINE_AA)
+                        t = player_timers[i]
+                        # Логика BPI для конкретного игрока
+                        if t == 0: bpi = 12 
+                        elif t <= 5.0: bpi = max(2, int(12 - (t * 2)))
+                        elif t <= 25.0: bpi = int(2 + ((t - 5) / 20) * 43)
+                        else: bpi = min(98, int(45 + ((t - 25) * 5)))
 
-                # ИНТЕЛЛЕКТУАЛЬНЫЙ РАСЧЕТ BPI (Зависит от ВРЕМЕНИ!)
-                if is_deep_focus_now:
-                    deep_focus_simulated_minutes += simulated_minutes_added
-                else:
-                    # Если расслабился, усталость понемногу спадает
-                    deep_focus_simulated_minutes = max(0, deep_focus_simulated_minutes - (simulated_minutes_added * 2))
+                        # Отрисовка рамки
+                        x1, y1 = int(x-pw/2), int(y-ph/2)
+                        x2, y2 = int(x+pw/2), int(y+ph/2)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3, cv2.LINE_AA)
+                        
+                        # Отрисовка ПРОФЕССИОНАЛЬНОГО текста (с черной подложкой)
+                        label = f"{cls} | BPI: {bpi}%"
+                        (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_COMPLEX, 0.7, 2)
+                        
+                        # Если текст не влезает сверху, рисуем его снизу рамки
+                        text_y = y1 - 10 if y1 > 40 else y2 + 30
+                        
+                        # Черный фон для текста (чтобы не было каши)
+                        cv2.rectangle(frame, (x1, text_y - text_height - 5), (x1 + text_width, text_y + 5), (0, 0, 0), -1)
+                        # Сам текст
+                        cv2.putText(frame, label, (x1, text_y), cv2.FONT_HERSHEY_COMPLEX, 0.7, color, 2, cv2.LINE_AA)
 
-                # Сама математика, которую ты просила:
-                if deep_focus_simulated_minutes == 0:
-                    bpi = 12 # Базовый риск
-                elif deep_focus_simulated_minutes <= 5.0:
-                    # Первые 5 минут фокуса - мозг работает идеально, риск ПАДАЕТ
-                    bpi = max(2, int(12 - (deep_focus_simulated_minutes * 2)))
-                elif deep_focus_simulated_minutes <= 25.0:
-                    # От 5 до 25 минут - нарастает усталость, риск ползет вверх до 45%
-                    bpi = int(2 + ((deep_focus_simulated_minutes - 5) / 20) * 43)
-                else:
-                    # БОЛЕЕ 25 МИНУТ - КРИТИЧЕСКАЯ УСТАЛОСТЬ / ЦЕЙТНОТ! Риск взлетает!
-                    bpi = min(98, int(45 + ((deep_focus_simulated_minutes - 25) * 5)))
-
-                # Отрисовка Дашборда прямо на видео
-                cv2.putText(frame, f"DEMO SPEED: 1 sec = 3 mins match time", (20, 40), cv2.FONT_HERSHEY_COMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
-                cv2.putText(frame, f"Think Time: {int(deep_focus_simulated_minutes)} mins", (20, 80), cv2.FONT_HERSHEY_COMPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA)
-                
-                bpi_color = (0, 0, 255) if bpi > 50 else (0, 255, 0)
-                cv2.putText(frame, f"Blunder Risk (BPI): {bpi}%", (20, 120), cv2.FONT_HERSHEY_COMPLEX, 1.2, bpi_color, 3, cv2.LINE_AA)
+                    # Общая плашка скорости симуляции (только одна, в углу)
+                    cv2.putText(frame, "SIMULATION SPEED: 1 sec = 3 mins", (20, 30), cv2.FONT_HERSHEY_COMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
+                    
+                except: pass
                 
                 out.write(frame)
-                if f_idx > 150: break # Защита от зависания
+                if f_idx > 150: break 
                 
             cap.release(); out.release()
             return send_file(temp_out, as_attachment=True)
 
         # ==========================================
-        # ОБРАБОТКА ФОТО (ТОЛЬКО ПОЗА, БЕЗ BPI)
+        # ОБРАБОТКА ФОТО (Без изменений, статика)
         # ==========================================
         else:
             file_bytes = np.frombuffer(file.read(), np.uint8)
@@ -130,14 +135,22 @@ def classify():
                 color = (0, 0, 255) if cls == "Deep_Focus" else (255, 0, 255)
                 c_css = "#ff4d4d" if cls == "Deep_Focus" else "#d633ff"
                 
-                cv2.rectangle(img, (int(x-pw/2), int(y-ph/2)), (int(x+pw/2), int(y+ph/2)), color, 4, cv2.LINE_AA)
-                cv2.putText(img, f"State: {cls}", (int(x-pw/2), int(y-ph/2)-10), cv2.FONT_HERSHEY_COMPLEX, 1.0, color, 2, cv2.LINE_AA)
+                x1, y1 = int(x-pw/2), int(y-ph/2)
+                x2, y2 = int(x+pw/2), int(y+ph/2)
                 
-                # В HTML выводим только статус, никакого BPI!
+                cv2.rectangle(img, (x1, y1), (x2, y2), color, 4, cv2.LINE_AA)
+                
+                # Текст с подложкой для фото
+                label = f"State: {cls}"
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_COMPLEX, 0.9, 2)
+                text_y = y1 - 10 if y1 > 40 else y2 + 30
+                cv2.rectangle(img, (x1, text_y - th - 5), (x1 + tw, text_y + 5), (0, 0, 0), -1)
+                cv2.putText(img, label, (x1, text_y), cv2.FONT_HERSHEY_COMPLEX, 0.9, color, 2, cv2.LINE_AA)
+                
                 stats_html += f"<div class='stats' style='color:{c_css};'>DETECTED POSTURE: {cls}</div>"
 
             _, res_buf = cv2.imencode('.jpg', img)
-            return f'<html><head>{CSS_STYLE}</head><body><div class="box"><h2>Static Image Analysis</h2><p style="font-size:14px; color:#aaa;">*BPI calculation requires live video feed (time-series data)</p>{stats_html}<img src="data:image/jpeg;base64,{base64.b64encode(res_buf).decode("utf-8")}"><br><br><a href="/" style="color:#d4af37;">← NEW SCAN</a></div></body></html>'
+            return f'<html><head>{CSS_STYLE}</head><body><div class="box"><h2>Static Image Analysis</h2><p style="font-size:14px; color:#aaa;">*BPI calculation requires live video feed</p>{stats_html}<img src="data:image/jpeg;base64,{base64.b64encode(res_buf).decode("utf-8")}"><br><br><a href="/" style="color:#d4af37;">← NEW SCAN</a></div></body></html>'
 
     except Exception as e: return str(e), 500
 
