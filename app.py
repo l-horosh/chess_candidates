@@ -53,7 +53,7 @@ def classify():
                 small_frame = cv2.resize(frame, (480, int(h * (480/w))))
                 _, buf = cv2.imencode('.jpg', small_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 65])
                 
-                url = f"https://detect.roboflow.com/{PROJECT_NAME}/{VERSION}?api_key={ROBOFLOW_API_KEY}&confidence=10"
+                url = f"https://detect.roboflow.com/{PROJECT_NAME}/{VERSION}?api_key={ROBOFLOW_API_KEY}&confidence=20"
                 try:
                     resp = requests.post(url, data=base64.b64encode(buf).decode('ascii'), headers={"Content-Type": "application/x-www-form-urlencoded"}).json()
                     preds = sorted(resp.get('predictions', []), key=lambda p: p['x'])
