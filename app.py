@@ -24,7 +24,7 @@ CSS_STYLE = '''
 
 @app.route('/')
 def home():
-    return f'<html><head>{CSS_STYLE}</head><body><div class="box"><h1>CogniMetrics AI</h1><p>BPI High-Frequency Analytics</p><form action="/classify" method="post" enctype="multipart/form-data"><input type="file" name="file" accept="image/*,video/*" required style="color:white;"><br><br><button type="submit">Run Analysis</button></form></div></body></html>'
+    return f'<html><head>{CSS_STYLE}</head><body><div class="box"><h1>CogniMetrics AI</h1><p>High-Stability BPI Tracker</p><form action="/classify" method="post" enctype="multipart/form-data"><input type="file" name="file" accept="image/*,video/*" required style="color:white;"><br><br><button type="submit">Run Stable Analysis</button></form></div></body></html>'
 
 @app.route("/classify", methods=['POST'])
 def classify():
@@ -39,68 +39,76 @@ def classify():
             fps = cap.get(5)
             if fps == 0 or np.isnan(fps): fps = 30
             
-            # Пишем видео с нормальной скоростью (fps/2 т.к. берем каждый 2-й кадр)
             out = cv2.VideoWriter(temp_out, cv2.VideoWriter_fourcc(*'mp4v'), fps/2, (w, h))
             
             f_idx = 0
-            player_timers = [0.0] * 5 
+            # Структура данных для "памяти" о каждом из 5 возможных игроков
+            # [таймер_усталости, сколько_кадров_еще_держать_рамку, координаты_последней_рамки, последний_класс]
+            memory = [[0.0, 0, None, "Normal_Focus"] for _ in range(5)]
             
             while True:
                 ret, frame = cap.read()
                 if not ret: break
                 f_idx += 1
-                
-                # Берем КАЖДЫЙ 2-Й КАДР для плавности
                 if f_idx % 2 != 0: continue 
                 
-                # Оптимизация: сжимаем кадр для API до 640px, чтобы не висло
                 small_frame = cv2.resize(frame, (640, int(h * (640/w))))
-                _, buf = cv2.imencode('.jpg', small_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+                _, buf = cv2.imencode('.jpg', small_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                 
-                # Порог уверенности ставим 10% (confidence=10)
                 url = f"https://detect.roboflow.com/{PROJECT_NAME}/{VERSION}?api_key={ROBOFLOW_API_KEY}&confidence=10"
                 try:
                     resp = requests.post(url, data=base64.b64encode(buf).decode('ascii'), headers={"Content-Type": "application/x-www-form-urlencoded"}).json()
-                    predictions = sorted(resp.get('predictions', []), key=lambda p: p['x'])
+                    preds = sorted(resp.get('predictions', []), key=lambda p: p['x'])
                     
-                    for i, p in enumerate(predictions):
+                    # 1. Помечаем всех в памяти как "не найденных в этом кадре"
+                    for m in memory: m[1] = max(0, m[1] - 1)
+                    
+                    # 2. Обновляем память новыми детекциями
+                    for i, p in enumerate(preds):
                         if i >= 5: break
                         x, y, pw, ph = int(p['x']*(w/640)), int(p['y']*(h/int(h*(640/w)))), int(p['width']*(w/640)), int(p['height']*(h/int(h*(640/w))))
-                        cls = p['class']
                         
-                        # Симуляция времени (1 сек видео = 3 мин матча)
-                        if cls == "Deep_Focus":
-                            player_timers[i] += (2/fps) * 3.0
-                            color = (0, 0, 255)
-                        else:
-                            player_timers[i] = max(0, player_timers[i] - 0.5)
-                            color = (255, 0, 255)
+                        memory[i][1] = 12 # Запоминаем игрока на следующие 12 кадров (инерция)
+                        memory[i][2] = (int(x-pw/2), int(y-ph/2), int(x+pw/2), int(y+ph/2))
+                        memory[i][3] = p['class']
 
-                        t = player_timers[i]
-                        if t <= 5.0: bpi = max(2, int(12 - (t * 2)))
-                        elif t <= 25.0: bpi = int(2 + ((t-5)/20)*43)
-                        else: bpi = min(98, int(45 + (t-25)*5))
+                    # 3. Рисуем рамки (из детекции или из памяти)
+                    for i, (timer, persistence, coords, cls) in enumerate(memory):
+                        if persistence > 0 and coords:
+                            # Симуляция времени только если детекция свежая (или небольшое затухание)
+                            if cls == "Deep_Focus":
+                                memory[i][0] += (2/fps) * 3.0
+                                color = (0, 0, 255)
+                            else:
+                                memory[i][0] = max(0, memory[i][0] - 0.3)
+                                color = (255, 0, 255)
 
-                        x1, y1, x2, y2 = int(x-pw/2), int(y-ph/2), int(x+pw/2), int(y+ph/2)
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 4, cv2.LINE_AA)
-                        
-                        label = f"{cls} | BPI: {bpi}%"
-                        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_COMPLEX, 0.8, 2)
-                        ty = y1 - 10 if y1 > 45 else y2 + 35
-                        cv2.rectangle(frame, (x1, ty-th-5), (x1+tw, ty+5), (0,0,0), -1)
-                        cv2.putText(frame, label, (x1, ty), cv2.FONT_HERSHEY_COMPLEX, 0.8, color, 2, cv2.LINE_AA)
+                            t = memory[i][0]
+                            # Математика BPI
+                            if t <= 5.0: bpi = max(2, int(12 - (t * 2)))
+                            elif t <= 25.0: bpi = int(2 + ((t-5)/20)*43)
+                            else: bpi = min(98, int(45 + (t-25)*5))
 
-                    cv2.putText(frame, "LIVE ANALYTICS ACTIVE", (20, 40), cv2.FONT_HERSHEY_COMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
+                            x1, y1, x2, y2 = coords
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 4, cv2.LINE_AA)
+                            
+                            label = f"{cls} | BPI: {bpi}%"
+                            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_COMPLEX, 0.8, 2)
+                            ty = y1 - 10 if y1 > 45 else y2 + 35
+                            cv2.rectangle(frame, (x1, ty-th-5), (x1+tw, ty+5), (0,0,0), -1)
+                            cv2.putText(frame, label, (x1, ty), cv2.FONT_HERSHEY_COMPLEX, 0.8, color, 2, cv2.LINE_AA)
+
+                    cv2.putText(frame, "STABLE TRACKING ENABLED", (20, 40), cv2.FONT_HERSHEY_COMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
                 except: pass
                 
                 out.write(frame)
-                if f_idx > 200: break # Лимит 100 кадров (около 7 сек анализа)
+                if f_idx > 220: break # Увеличил лимит до ~10 секунд видео
                 
             cap.release(); out.release()
             return send_file(temp_out, as_attachment=True)
 
         else:
-            # ДЛЯ ФОТО (confidence=10 чтобы наверняка!)
+            # ДЛЯ ФОТО (оставляем как есть, тут инерция не нужна)
             file_bytes = np.frombuffer(file.read(), np.uint8)
             img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
             _, buf = cv2.imencode('.jpg', img)
