@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 import requests
 import base64
 import os
@@ -80,78 +80,112 @@ def home():
 def classify():
     file = request.files['file']
     filename = file.filename.lower()
-    file_bytes = np.frombuffer(file.read(), np.uint8)
     
     try:
-        # 1. Читаем картинку или 1 кадр из видео
+        # === ОБРАБОТКА ВИДЕО ===
         if filename.endswith(('.mp4', '.avi', '.mov')):
-            temp = "temp.mp4"
-            with open(temp, "wb") as f: f.write(file_bytes)
-            cap = cv2.VideoCapture(temp)
-            success, frame = cap.read()
+            temp_in = "temp_in.mp4"
+            temp_out = "temp_out.mp4"
+            file.save(temp_in)
+            
+            cap = cv2.VideoCapture(temp_in)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps == 0 or np.isnan(fps): fps = 30
+            
+            # Настраиваем рендер видео (сокращаем FPS, чтобы успеть до тайм-аута сервера)
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(temp_out, fourcc, fps/5, (width, height))
+            
+            frame_count = 0
+            while True:
+                success, frame = cap.read()
+                if not success: break
+                frame_count += 1
+                
+                # Пропускаем кадры (берем каждый 5-й кадр), чтобы сайт не упал!
+                if frame_count % 5 != 0: continue
+                
+                _, buffer = cv2.imencode('.jpg', frame)
+                img_b64 = base64.b64encode(buffer).decode('ascii')
+                url = f"https://detect.roboflow.com/{PROJECT_NAME}/{VERSION}?api_key={ROBOFLOW_API_KEY}&confidence=15"
+                
+                try:
+                    resp = requests.post(url, data=img_b64, headers={"Content-Type": "application/x-www-form-urlencoded"}).json()
+                    for pred in resp.get('predictions', []):
+                        x, y, w, h = int(pred['x']), int(pred['y']), int(pred['width']), int(pred['height'])
+                        cls = pred['class']
+                        conf = int(pred['confidence'] * 100)
+                        
+                        color = (0, 0, 255) if cls == "Deep_Focus" else (255, 0, 255)
+                        cv2.rectangle(frame, (int(x - w/2), int(y - h/2)), (int(x + w/2), int(y + h/2)), color, 4)
+                        cv2.putText(frame, f"{cls}: {conf}%", (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_DUPLEX, 1, color, 2)
+                except: pass
+                
+                out.write(frame)
+                
+                # Ограничитель: обрабатываем максимум 150 кадров, чтобы не было ошибки 504
+                if frame_count > 150: break
+                
             cap.release()
-            os.remove(temp)
-            img = frame
+            out.release()
+            if os.path.exists(temp_in): os.remove(temp_in)
+            
+            # Возвращаем ГОТОВОЕ ВИДЕО как файл для скачивания!
+            return send_file(temp_out, as_attachment=True, download_name="analyzed_match.mp4")
+
+        # === ОБРАБОТКА ФОТО (как было, с крутым дашбордом) ===
         else:
+            file_bytes = np.frombuffer(file.read(), np.uint8)
             img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
-        # 2. Отправляем картинку в Roboflow (просим JSON)
-        _, buffer = cv2.imencode('.jpg', img)
-        img_b64 = base64.b64encode(buffer).decode('ascii')
-        
-        # Обрати внимание: мы убрали format=image. Теперь получаем умный JSON!
-        url = f"https://detect.roboflow.com/{PROJECT_NAME}/{VERSION}?api_key={ROBOFLOW_API_KEY}&confidence=15"
-        response = requests.post(url, data=img_b64, headers={"Content-Type": "application/x-www-form-urlencoded"})
-        data = response.json()
+            _, buffer = cv2.imencode('.jpg', img)
+            img_b64 = base64.b64encode(buffer).decode('ascii')
+            
+            url = f"https://detect.roboflow.com/{PROJECT_NAME}/{VERSION}?api_key={ROBOFLOW_API_KEY}&confidence=15"
+            data = requests.post(url, data=img_b64, headers={"Content-Type": "application/x-www-form-urlencoded"}).json()
 
-        # 3. Рисуем рамки и считаем проценты САМИ
-        predictions = data.get('predictions', [])
-        stats_html = ""
+            predictions = data.get('predictions', [])
+            stats_html = ""
 
-        if not predictions:
-            stats_html = "<div class='stats' style='color: #e74c3c;'>No player detected. Confidence < 15%</div>"
-        else:
-            for pred in predictions:
-                x, y, w, h = int(pred['x']), int(pred['y']), int(pred['width']), int(pred['height'])
-                cls = pred['class']
-                conf = int(pred['confidence'] * 100) # Переводим в проценты!
-                
-                # Задаем цвета
-                if cls == "Deep_Focus":
-                    color = (0, 0, 255) # Красный для OpenCV (BGR)
-                    color_css = "#ff4d4d"
-                else:
-                    color = (255, 0, 255) # Фиолетовый
-                    color_css = "#d633ff"
+            if not predictions:
+                stats_html = "<div class='stats' style='color: #e74c3c;'>No player detected. Confidence < 15%</div>"
+            else:
+                for pred in predictions:
+                    x, y, w, h = int(pred['x']), int(pred['y']), int(pred['width']), int(pred['height'])
+                    cls = pred['class']
+                    conf = int(pred['confidence'] * 100)
+                    
+                    if cls == "Deep_Focus":
+                        color = (0, 0, 255) 
+                        color_css = "#ff4d4d"
+                    else:
+                        color = (255, 0, 255) 
+                        color_css = "#d633ff"
 
-                # Рисуем саму рамку
-                cv2.rectangle(img, (int(x - w/2), int(y - h/2)), (int(x + w/2), int(y + h/2)), color, 4)
-                
-                # Пишем текст НА картинке
-                label = f"{cls}: {conf}%"
-                cv2.putText(img, label, (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_DUPLEX, 1, color, 2)
-                
-                # Добавляем красивую панель с процентами НАД картинкой
-                stats_html += f"<div class='stats' style='color: {color_css};'>Detected State: <b>{cls}</b> | Confidence: <b>{conf}%</b></div>"
+                    cv2.rectangle(img, (int(x - w/2), int(y - h/2)), (int(x + w/2), int(y + h/2)), color, 4)
+                    label = f"{cls}: {conf}%"
+                    cv2.putText(img, label, (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_DUPLEX, 1, color, 2)
+                    stats_html += f"<div class='stats' style='color: {color_css};'>Detected State: <b>{cls}</b> | Confidence: <b>{conf}%</b></div>"
 
-        # 4. Кодируем готовую картинку с нашими рамками обратно для HTML
-        _, result_buffer = cv2.imencode('.jpg', img)
-        res_img_b64 = base64.b64encode(result_buffer).decode('utf-8')
-        
-        return f'''
-        <html>
-        <head>{CSS_STYLE}</head>
-        <body>
-            <div class="box">
-                <h2>Live Feed Analysis</h2>
-                {stats_html}
-                <img src="data:image/jpeg;base64,{res_img_b64}">
-                <br><br>
-                <a href="/" style="color: #d4af37; text-decoration: none; font-weight: bold; border: 1px solid #d4af37; padding: 10px 20px; border-radius: 5px;">← ANALYZE NEW FEED</a>
-            </div>
-        </body>
-        </html>
-        '''
+            _, result_buffer = cv2.imencode('.jpg', img)
+            res_img_b64 = base64.b64encode(result_buffer).decode('utf-8')
+            
+            return f'''
+            <html>
+            <head>{CSS_STYLE}</head>
+            <body>
+                <div class="box">
+                    <h2>Live Feed Analysis</h2>
+                    {stats_html}
+                    <img src="data:image/jpeg;base64,{res_img_b64}">
+                    <br><br>
+                    <a href="/" style="color: #d4af37; text-decoration: none; font-weight: bold; border: 1px solid #d4af37; padding: 10px 20px; border-radius: 5px;">← ANALYZE NEW FEED</a>
+                </div>
+            </body>
+            </html>
+            '''
     except Exception as e:
         return f"Error: {str(e)}", 500
 
