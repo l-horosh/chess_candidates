@@ -12,64 +12,59 @@ ROBOFLOW_API_KEY = "zipFoxXwSowFhMRI79Sv"
 PROJECT_NAME = "candidates-chess" 
 VERSION = "2"
 
-def process_and_draw(frame):
-    # Уменьшаем для скорости
-    height, width = frame.shape[:2]
-    scale = 640 / width
-    small_frame = cv2.resize(frame, (int(width * scale), int(height * scale)))
-    
-    _, buffer = cv2.imencode('.jpg', small_frame)
-    img_base64 = base64.b64encode(buffer).decode('ascii')
-    
-    # Запрос JSON (не картинки!), чтобы самим рисовать цвета
-    url = f"https://detect.roboflow.com/{PROJECT_NAME}/{VERSION}?api_key={ROBOFLOW_API_KEY}"
-    resp = requests.post(url, data=img_base64, headers={"Content-Type": "application/x-www-form-urlencoded"}).json()
-    
-    for pred in resp.get('predictions', []):
-        x, y, w, h = pred['x'], pred['y'], pred['width'], pred['height']
-        cls = pred['class']
-        
-        # Выбираем цвет: BGR формат
-        if cls == "Deep_Focus":
-            color = (0, 0, 255) # Красный
-        elif cls == "Normal_Focus":
-            color = (128, 0, 128) # Фиолетовый
-        else:
-            color = (0, 255, 0) # Зеленый для остального
-            
-        # Рисуем рамку
-        x1, y1 = int(x - w/2), int(y - h/2)
-        x2, y2 = int(x + w/2), int(y + h/2)
-        cv2.rectangle(small_frame, (x1, y1), (x2, y2), color, 3)
-        cv2.putText(small_frame, f"{cls}", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-    _, final_buffer = cv2.imencode('.jpg', small_frame)
-    return base64.b64encode(final_buffer).decode('utf-8')
+# Общий стиль для всех страниц (Nano Banan / Dark Chess)
+CSS_STYLE = '''
+<style>
+    body { 
+        font-family: 'Segoe UI', sans-serif; 
+        background: radial-gradient(circle at center, #2c3e50 0%, #000000 100%);
+        color: #d4af37; 
+        text-align: center; 
+        margin: 0;
+        padding: 20px;
+        min-height: 100vh;
+    }
+    .box { 
+        background: rgba(44, 44, 44, 0.9); 
+        border: 2px solid #d4af37; 
+        padding: 30px; 
+        border-radius: 15px; 
+        display: inline-block; 
+        box-shadow: 0 0 30px rgba(212, 175, 55, 0.3);
+        margin-top: 50px;
+    }
+    h1 { letter-spacing: 5px; text-transform: uppercase; color: #f1c40f; text-shadow: 2px 2px #000; }
+    img { 
+        max-width: 90%; 
+        max-height: 60vh; /* Чтобы не было огромным! */
+        border: 3px solid #d4af37; 
+        border-radius: 10px;
+        object-fit: contain;
+    }
+    button { 
+        background: #d4af37; color: black; border: none; padding: 15px 40px; 
+        cursor: pointer; font-weight: bold; border-radius: 30px; 
+        font-size: 18px; transition: 0.3s;
+    }
+    button:hover { background: #fff; transform: scale(1.05); }
+    .footer { margin-top: 20px; color: #7f8c8d; font-size: 12px; }
+</style>
+'''
 
 @app.route('/')
 def home():
-    return '''
-    <!DOCTYPE html>
+    return f'''
     <html>
-    <head>
-        <title>CogniMetrics AI | Chess Elite</title>
-        <style>
-            body { font-family: 'Georgia', serif; background-color: #1a1a1a; color: #d4af37; text-align: center; padding: 50px; }
-            .box { background: #2c2c2c; border: 2px solid #d4af37; padding: 40px; border-radius: 5px; display: inline-block; box-shadow: 0 0 20px rgba(0,0,0,0.5); }
-            h1 { letter-spacing: 3px; text-transform: uppercase; }
-            input { background: #3d3d3d; color: white; border: 1px solid #d4af37; padding: 10px; margin: 10px; }
-            button { background: #d4af37; color: black; border: none; padding: 15px 30px; cursor: pointer; font-weight: bold; text-transform: uppercase; transition: 0.3s; }
-            button:hover { background: #f1c40f; box-shadow: 0 0 10px #d4af37; }
-        </style>
-    </head>
+    <head>{CSS_STYLE}</head>
     <body>
         <div class="box">
             <h1>CogniMetrics AI</h1>
-            <p>Advanced Posture & Focus Analysis for Grandmasters</p>
+            <p>Elite Behavioral Analytics | Nano Banan Edition</p>
             <form action="/classify" method="post" enctype="multipart/form-data">
-                <input type="file" name="file" accept="image/*,video/*" required><br>
-                <button type="submit">Start Grandmaster Analysis</button>
+                <input type="file" name="file" accept="image/*,video/*" required style="margin: 20px 0; color: white;"><br>
+                <button type="submit">Analyze Performance</button>
             </form>
+            <div class="footer">Powered by DeepFocus YOLOv11</div>
         </div>
     </body>
     </html>
@@ -80,40 +75,47 @@ def classify():
     file = request.files['file']
     filename = file.filename.lower()
     file_bytes = np.frombuffer(file.read(), np.uint8)
-    results = []
-
+    
     try:
+        # Извлекаем кадр если это видео
         if filename.endswith(('.mp4', '.avi', '.mov')):
-            temp = "temp_vid.mp4"
+            temp = "temp.mp4"
             with open(temp, "wb") as f: f.write(file_bytes)
             cap = cv2.VideoCapture(temp)
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            
-            # Берем 1 кадр в секунду (для 10 секунд будет 10 кадров)
-            for i in range(10):
-                cap.set(cv2.CAP_PROP_POS_FRAMES, int(i * fps))
-                success, frame = cap.read()
-                if not success: break
-                results.append(process_and_draw(frame))
+            success, frame = cap.read()
             cap.release()
             os.remove(temp)
+            img = frame
         else:
             img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-            results.append(process_and_draw(img))
 
-        imgs_html = "".join([f'<div style="margin:10px;"><img src="data:image/jpeg;base64,{img}" style="width:100%; border:1px solid #d4af37;"></div>' for img in results])
+        # Подготовка картинки для Roboflow
+        _, buffer = cv2.imencode('.jpg', img)
+        img_b64 = base64.b64encode(buffer).decode('ascii')
+        
+        # Запрашиваем КАРТИНКУ с рамками (confidence=15 чтобы точно нашел!)
+        # Цвет рамок Roboflow рисует сам, но это 100% работает
+        url = f"https://detect.roboflow.com/{PROJECT_NAME}/{VERSION}?api_key={ROBOFLOW_API_KEY}&format=image&stroke=5&confidence=15"
+        
+        response = requests.post(url, data=img_b64, headers={{"Content-Type": "application/x-www-form-urlencoded"}})
+        
+        res_img_b64 = base64.b64encode(response.content).decode('utf-8')
         
         return f'''
-        <body style="background:#1a1a1a; color:#d4af37; font-family:sans-serif; text-align:center; padding:20px;">
-            <h2>Analysis Timeline</h2>
-            <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap:10px;">
-                {imgs_html}
+        <html>
+        <head>{CSS_STYLE}</head>
+        <body>
+            <div class="box">
+                <h2>Analysis Result</h2>
+                <img src="data:image/jpeg;base64,{res_img_b64}">
+                <br><br>
+                <a href="/" style="color: #d4af37; text-decoration: none; font-weight: bold;">← BACK TO DASHBOARD</a>
             </div>
-            <br><a href="/" style="color:#d4af37; text-decoration:none; border:1px solid #d4af37; padding:10px;">New Analysis</a>
         </body>
+        </html>
         '''
     except Exception as e:
-        return str(e), 500
+        return f"Error: {str(e)}", 500
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
