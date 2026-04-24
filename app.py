@@ -12,80 +12,108 @@ ROBOFLOW_API_KEY = "zipFoxXwSowFhMRI79Sv"
 PROJECT_NAME = "candidates-chess" 
 VERSION = "2"
 
+def process_and_draw(frame):
+    # Уменьшаем для скорости
+    height, width = frame.shape[:2]
+    scale = 640 / width
+    small_frame = cv2.resize(frame, (int(width * scale), int(height * scale)))
+    
+    _, buffer = cv2.imencode('.jpg', small_frame)
+    img_base64 = base64.b64encode(buffer).decode('ascii')
+    
+    # Запрос JSON (не картинки!), чтобы самим рисовать цвета
+    url = f"https://detect.roboflow.com/{PROJECT_NAME}/{VERSION}?api_key={ROBOFLOW_API_KEY}"
+    resp = requests.post(url, data=img_base64, headers={"Content-Type": "application/x-www-form-urlencoded"}).json()
+    
+    for pred in resp.get('predictions', []):
+        x, y, w, h = pred['x'], pred['y'], pred['width'], pred['height']
+        cls = pred['class']
+        
+        # Выбираем цвет: BGR формат
+        if cls == "Deep_Focus":
+            color = (0, 0, 255) # Красный
+        elif cls == "Normal_Focus":
+            color = (128, 0, 128) # Фиолетовый
+        else:
+            color = (0, 255, 0) # Зеленый для остального
+            
+        # Рисуем рамку
+        x1, y1 = int(x - w/2), int(y - h/2)
+        x2, y2 = int(x + w/2), int(y + h/2)
+        cv2.rectangle(small_frame, (x1, y1), (x2, y2), color, 3)
+        cv2.putText(small_frame, f"{cls}", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+    _, final_buffer = cv2.imencode('.jpg', small_frame)
+    return base64.b64encode(final_buffer).decode('utf-8')
+
 @app.route('/')
 def home():
     return '''
-    <style>
-        body { font-family: sans-serif; text-align: center; padding-top: 50px; background: #f0f2f5; }
-        .box { background: white; display: inline-block; padding: 30px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        button { background: #007bff; color: white; border: none; padding: 12px 24px; cursor: pointer; border-radius: 5px; font-size: 16px; font-weight: bold;}
-    </style>
-    <div class="box">
-        <h1>CogniMetrics AI: Visual Demo</h1>
-        <p>Upload a chess image or video to see the DeepFocus bounding boxes.</p>
-        <form action="/classify" method="post" enctype="multipart/form-data">
-            <input type="file" name="file" required><br><br>
-            <button type="submit">Analyze & Visualize</button>
-        </form>
-    </div>
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>CogniMetrics AI | Chess Elite</title>
+        <style>
+            body { font-family: 'Georgia', serif; background-color: #1a1a1a; color: #d4af37; text-align: center; padding: 50px; }
+            .box { background: #2c2c2c; border: 2px solid #d4af37; padding: 40px; border-radius: 5px; display: inline-block; box-shadow: 0 0 20px rgba(0,0,0,0.5); }
+            h1 { letter-spacing: 3px; text-transform: uppercase; }
+            input { background: #3d3d3d; color: white; border: 1px solid #d4af37; padding: 10px; margin: 10px; }
+            button { background: #d4af37; color: black; border: none; padding: 15px 30px; cursor: pointer; font-weight: bold; text-transform: uppercase; transition: 0.3s; }
+            button:hover { background: #f1c40f; box-shadow: 0 0 10px #d4af37; }
+        </style>
+    </head>
+    <body>
+        <div class="box">
+            <h1>CogniMetrics AI</h1>
+            <p>Advanced Posture & Focus Analysis for Grandmasters</p>
+            <form action="/classify" method="post" enctype="multipart/form-data">
+                <input type="file" name="file" accept="image/*,video/*" required><br>
+                <button type="submit">Start Grandmaster Analysis</button>
+            </form>
+        </div>
+    </body>
+    </html>
     '''
 
 @app.route("/classify", methods=['POST'])
 def classify():
-    if 'file' not in request.files:
-        return "No file uploaded", 400
-    
     file = request.files['file']
     filename = file.filename.lower()
-    
+    file_bytes = np.frombuffer(file.read(), np.uint8)
+    results = []
+
     try:
-        file_bytes = np.frombuffer(file.read(), np.uint8)
-        
-        if filename.endswith(('.mp4', '.avi', '.mov', '.mkv')):
-            temp_path = "temp_video.mp4"
-            with open(temp_path, 'wb') as f:
-                f.write(file_bytes)
-            cap = cv2.VideoCapture(temp_path)
-            success, frame = cap.read()
+        if filename.endswith(('.mp4', '.avi', '.mov')):
+            temp = "temp_vid.mp4"
+            with open(temp, "wb") as f: f.write(file_bytes)
+            cap = cv2.VideoCapture(temp)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            
+            # Берем 1 кадр в секунду (для 10 секунд будет 10 кадров)
+            for i in range(10):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(i * fps))
+                success, frame = cap.read()
+                if not success: break
+                results.append(process_and_draw(frame))
             cap.release()
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-            if not success:
-                return "Could not extract frame", 500
-            img = frame
+            os.remove(temp)
         else:
             img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+            results.append(process_and_draw(img))
 
-        height, width = img.shape[:2]
-        if width > 1280:
-            scale = 1280 / width
-            img = cv2.resize(img, (int(width * scale), int(height * scale)))
-            
-        _, buffer = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-        encoded_string = base64.b64encode(buffer).decode('ascii')
+        imgs_html = "".join([f'<div style="margin:10px;"><img src="data:image/jpeg;base64,{img}" style="width:100%; border:1px solid #d4af37;"></div>' for img in results])
         
-        # Запрашиваем КАРТИНКУ с нарисованными рамками
-        url = f"https://detect.roboflow.com/{PROJECT_NAME}/{VERSION}?api_key={ROBOFLOW_API_KEY}&format=image&stroke=5"
-        
-        response = requests.post(url, data=encoded_string, headers={"Content-Type": "application/x-www-form-urlencoded"})
-        
-        if response.status_code == 200:
-            result_img_b64 = base64.b64encode(response.content).decode('utf-8')
-            return f'''
-            <div style="text-align: center; font-family: sans-serif; padding: 50px; background: #f0f2f5; min-height: 100vh;">
-                <div style="background: white; display: inline-block; padding: 30px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-                    <h2>DeepFocus Detection Result</h2>
-                    <img src="data:image/jpeg;base64,{result_img_b64}" style="max-width: 800px; border-radius: 8px; border: 2px solid #007bff;">
-                    <br><br>
-                    <a href="/" style="padding: 10px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 5px; font-size: 16px;">Upload Another File</a>
-                </div>
+        return f'''
+        <body style="background:#1a1a1a; color:#d4af37; font-family:sans-serif; text-align:center; padding:20px;">
+            <h2>Analysis Timeline</h2>
+            <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap:10px;">
+                {imgs_html}
             </div>
-            '''
-        else:
-            return f"Roboflow API Error: {response.text}", 500
-
+            <br><a href="/" style="color:#d4af37; text-decoration:none; border:1px solid #d4af37; padding:10px;">New Analysis</a>
+        </body>
+        '''
     except Exception as e:
-        return f"Internal Error: {str(e)}", 500
+        return str(e), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
