@@ -12,7 +12,6 @@ ROBOFLOW_API_KEY = "zipFoxXwSowFhMRI79Sv"
 PROJECT_NAME = "candidates-chess" 
 VERSION = "2"
 
-# Общий стиль для всех страниц (Nano Banan / Dark Chess)
 CSS_STYLE = '''
 <style>
     body { 
@@ -36,7 +35,7 @@ CSS_STYLE = '''
     h1 { letter-spacing: 5px; text-transform: uppercase; color: #f1c40f; text-shadow: 2px 2px #000; }
     img { 
         max-width: 90%; 
-        max-height: 60vh; /* Чтобы не было огромным! */
+        max-height: 60vh;
         border: 3px solid #d4af37; 
         border-radius: 10px;
         object-fit: contain;
@@ -77,7 +76,6 @@ def classify():
     file_bytes = np.frombuffer(file.read(), np.uint8)
     
     try:
-        # Извлекаем кадр если это видео
         if filename.endswith(('.mp4', '.avi', '.mov')):
             temp = "temp.mp4"
             with open(temp, "wb") as f: f.write(file_bytes)
@@ -89,15 +87,13 @@ def classify():
         else:
             img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
-        # Подготовка картинки для Roboflow
         _, buffer = cv2.imencode('.jpg', img)
         img_b64 = base64.b64encode(buffer).decode('ascii')
         
-        # Запрашиваем КАРТИНКУ с рамками (confidence=15 чтобы точно нашел!)
-        # Цвет рамок Roboflow рисует сам, но это 100% работает
         url = f"https://detect.roboflow.com/{PROJECT_NAME}/{VERSION}?api_key={ROBOFLOW_API_KEY}&format=image&stroke=5&confidence=15"
         
-        response = requests.post(url, data=img_b64, headers={{"Content-Type": "application/x-www-form-urlencoded"}})
+        # Вот она, исправленная строчка с одинарными скобками!
+        response = requests.post(url, data=img_b64, headers={"Content-Type": "application/x-www-form-urlencoded"})
         
         res_img_b64 = base64.b64encode(response.content).decode('utf-8')
         
